@@ -1,0 +1,653 @@
+//PIN DEFINITIONS
+// pin definitions -- edit these when robot pins are decided
+#define ECHO_PIN 11
+#define TRIG_PIN 12
+#define TEMP_PIN A0
+#define SERVO_PIN 13
+
+//THESE PINS CANNOT BE CHANGED
+//AS THEY ARE THE ONLY ONES THAT
+//SUPPORT INTERRUPTS
+#define LEFT_HALL 2
+#define RIGHT_HALL 3
+
+// motor control pins -- these pins cannot be reassigned
+#define EL 5
+#define ML 4
+#define ER 6
+#define MR 7
+
+
+//switch pins
+#define SW_PIN_1 A1
+#define SW_PIN_2 10
+//PART 2 DEFINITIONS
+#define FARLEFTIR 8
+#define LEFTIR 16
+#define RIGHTIR 17
+#define FARRIGHTIR 9
+
+//PART 1 DEFINITIONS
+// robot speed settings
+#define TOP_SPEED     255
+#define TURN_SPEED    125
+#define MIN_SPEED     100
+#define NAV_SPEED     100
+#define WAIT_SPEED     15
+#define STOP            0
+
+#define SLOW_INCREMENT 15
+#define TURN_TIME    1150 //1.3 seconds
+
+#define RIGHT_WHEEL true
+#define LEFT_WHEEL false
+#define FORWARDS    true
+#define BACKWARDS  false
+
+// servo motor angles
+#define FRONT 90
+#define RIGHT 0 
+#define LEFT 180
+
+//Other constants
+#define NUM_READS 10
+#define MAG_ROT    1
+#define SLOW_DIST 50 //cm
+#define TURN_DIST 15 //cm
+
+
+//Allowed to use the library
+#include <Servo.h>
+#include <LiquidCrystal.h>
+#include <Wire.h>
+
+//PART 2 DEFINITIONS & GLOBAL VARIABLES
+
+/*
+   Sensors will be set up in an array such that the far pins should not be on the line -
+   if they are, make adjustments.
+*/
+
+//MASTER/SLAVE DEFINITIONS
+#define MSG_LEFT 0 
+#define MSG_RIGHT 1
+#define MSG_STRAIGHT 2
+#define MSG_REVERSE 3
+#define MSG_START 4
+#define MSG_BUZZER_ON 5
+#define MSG_BUZZER_OFF 6
+#define MSG_FOLLOW_LINE 7
+#define MSG_FINDING_LINE 8
+#define MSG_SLOWING_DOWN 9
+
+//FUNCTION HEADERS - PART 1
+void motor_drive(int, boolean, boolean);
+void driveStraightToWall();
+
+//Range finding helpers
+float sensor_ping();
+float sensor_avg();
+unsigned long getPulseDuration();
+float readTemp();
+float lookLeft();
+float lookRight();
+void navigateObstacles();
+//Driving helpers
+void driveRightWheel(int);
+void driveLeftWheel(int);
+void reverseRightWheel();
+void reverseLeftWheel();
+void stopRightWheel();
+void stopLeftWheel();
+void turnLeft();
+void turnRight();
+void slowDown();
+
+//Interrupt helpers
+void updateLeft();
+void updateRight();
+
+//Interrupts
+void leftHallInterrupt();
+void rightHallInterrupt();
+
+//FUNCTION HEADERS - PART 2
+void followLine();
+bool onTape(int);
+
+//FUNCTION HEADERS - MASTER/SLAVE
+void transmit_message(int);
+//FUNCTION HEADERS - ADDITIONAL
+void runBluetooth();
+//Global timing variables for the Hall effect sensors
+volatile unsigned long leftTime = 10;
+volatile unsigned long prevLeftTime = 0;
+volatile unsigned long rightTime = 10;
+volatile unsigned long prevRightTime = 0;
+
+Servo servo;
+bool LEFT_HALL_SWITCH = false;
+bool RIGHT_HALL_SWITCH = false;
+
+//TEMPORARY GLOBAL VARIABLES
+bool sw1 = HIGH;
+bool sw2 = HIGH;
+bool btOverride = false;
+
+int leftRots = 0;
+int rightRots = 0;
+
+void setup(){  
+  Serial.begin(9600);
+  //PART 1 SETUP
+  servo.attach(SERVO_PIN); 
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  servo.attach(SERVO_PIN);
+  servo.write(FRONT);
+  
+  //PART 2 SETUP
+  pinMode(FARLEFTIR, INPUT);
+  pinMode(FARRIGHTIR, INPUT);
+  pinMode(RIGHTIR, INPUT);
+  pinMode(LEFTIR, INPUT);
+  
+  //MASTER-SLAVE SETUP
+  Wire.begin();
+  transmit_message(MSG_START);
+  //SWITCH SETUP
+  pinMode(SW_PIN_1, INPUT_PULLUP);
+  pinMode(SW_PIN_2, INPUT_PULLUP);
+  pinMode(TEMP_PIN, INPUT);
+  delay(1000);
+  if(digitalRead(SW_PIN_1) == LOW && digitalRead(SW_PIN_2) == LOW){
+    transmit_message(MSG_FOLLOW_LINE);
+  }
+}
+
+
+void loop(){
+  //if(!btOverride){
+    sw1 = digitalRead(SW_PIN_1);
+    sw2 = digitalRead(SW_PIN_2);
+  //}
+  if(sw1 == HIGH && sw2 == HIGH){
+    navigateObstacles();
+    Serial.println("HALL EFFECT");
+  }
+  else if(sw1 == LOW && sw2 == LOW){
+    //transmit_message(MSG_FOLLOW_LINE);
+    followLine();
+    Serial.println("FOLLOW LINE");
+  }
+  else{
+    runBluetooth();
+    Serial.println("BLUETOOTH");
+  }
+}
+
+//PART 2 FUNCTIONS
+void followLine(){
+  driveLeftWheel(NAV_SPEED);
+  driveRightWheel(NAV_SPEED);
+
+  //Assume that we place the middle two sensors on the tape
+  while(onTape(LEFTIR) && onTape(RIGHTIR)){
+    //just keep going
+  }
+
+  //One of the two is off...
+  if(onTape(LEFTIR)){ //Right one is off, turn left
+    driveLeftWheel(WAIT_SPEED);
+    driveRightWheel(NAV_SPEED);
+    while(!onTape(RIGHTIR)){
+      //Wait for it to get back
+      if(onTape(FARLEFTIR))
+          stopLeftWheel();
+    }
+  }else{
+    driveRightWheel(WAIT_SPEED);
+    driveLeftWheel(NAV_SPEED);
+    while(!onTape(LEFTIR)){
+      //Wait for it to get back
+      if(onTape(FARRIGHTIR))
+          stopRightWheel();
+    }
+  }
+}
+
+
+bool onTape(int port){
+  return digitalRead(port) == 1;
+}
+
+//PART 1 FUNCTIONS
+void navigateObstacles()
+{
+  //Interrupts to tell us when the Hall effect sensors go high
+  attachInterrupt(digitalPinToInterrupt(LEFT_HALL), leftHallInterrupt, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(RIGHT_HALL), rightHallInterrupt, CHANGE); 
+
+  updateLeft();
+  updateRight();
+  driveStraightToWall();
+  //sensor_ping();
+  slowDown();
+  float left = lookLeft();
+  float right = lookRight();
+  if(left > right){
+    turnLeft();
+  }else{
+    turnRight();
+  }  
+}
+
+void driveStraightToWall(){
+
+  transmit_message(MSG_STRAIGHT);
+  
+  int leftSpeed = TOP_SPEED;
+  int rightSpeed = TOP_SPEED;
+
+  //Get rid
+  float sensor_ping_val = 500;
+  //
+  
+  driveLeftWheel(leftSpeed);
+  driveRightWheel(rightSpeed);
+  
+  while(sensor_ping_val > SLOW_DIST && sensor_ping() > SLOW_DIST){
+    //Serial.println(sensor_ping());
+    float leftRotTime = leftTime - prevLeftTime;
+    float rightRotTime = rightTime - prevRightTime;
+    float realDiff = leftRotTime - rightRotTime;
+    float avgTime = (leftRotTime + rightRotTime)/2;
+    float perDiff = realDiff / avgTime;
+    //Serial.println(perDiff);
+
+    if(perDiff > 0.1)
+        perDiff = 0.1;
+
+    if(perDiff < -0.1)
+        perDiff = -0.1;
+  
+    if(perDiff > 0) { //right rotated faster
+
+    //  if(leftSpeed == TOP_SPEED){ //Left cannot go any faster
+      //  rightSpeed *= (1 - perDiff); // <---This is a good guess
+        
+    //  } else {
+        rightSpeed = TOP_SPEED*(1-perDiff); //wiggle
+        leftSpeed = TOP_SPEED; 
+     // }   
+    }
+    
+    else{ //left rotated faster
+
+      
+      //if(rightSpeed == TOP_SPEED){ //Right cannot go any faster
+       // leftSpeed *= (1 + perDiff);
+        
+      //} else {
+        leftSpeed = TOP_SPEED*(1 + perDiff); //wiggle
+        rightSpeed = TOP_SPEED;
+     // }
+    }
+    driveLeftWheel(leftSpeed);
+    driveRightWheel(rightSpeed);
+
+      //*** Get rid
+   sensor_ping_val = sensor_ping();
+   Serial.println(sensor_ping_val);
+  }
+
+  stopLeftWheel();
+  stopRightWheel();
+
+  
+}
+
+void motor_drive(int speed, bool forward, bool right_motor){
+    int motor_pin;
+    int motor_drive;
+
+   //Serial.println("driving motor");
+
+    //Decide which pins to use.
+    if (right_motor) {
+        motor_pin = ER;
+        motor_drive = MR;
+    }
+
+    else {
+        motor_pin = EL;
+        motor_drive = ML;
+    }
+
+    pinMode(motor_pin, OUTPUT);
+    pinMode(motor_drive, OUTPUT);
+
+    //Disable motor case.
+    if (speed == 0) {
+        // E -> L, M -> X
+        digitalWrite(motor_pin, LOW);
+        digitalWrite(motor_drive, LOW);
+        return;
+    }
+
+    //Check if going backwards * Not sure if right.
+    if (!forward) {
+        // E -> H, M -> H.
+        digitalWrite(motor_pin, HIGH);
+        digitalWrite(motor_drive, HIGH);
+    }
+
+    else {
+        // E -> PWM, M -> X
+        analogWrite(motor_pin, speed);
+        analogWrite(motor_drive, LOW);
+    }
+    
+}
+
+void driveRightWheel(int speed){
+  motor_drive(speed, FORWARDS, RIGHT_WHEEL);
+}
+
+void driveLeftWheel(int speed){
+  motor_drive(speed, FORWARDS, LEFT_WHEEL);
+}
+
+void reverseRightWheel(){
+  motor_drive(0, BACKWARDS, RIGHT_WHEEL);
+}
+
+void reverseLeftWheel(){
+  motor_drive(0, BACKWARDS, LEFT_WHEEL);
+}
+
+void stopRightWheel(){
+  motor_drive(STOP, FORWARDS, RIGHT_WHEEL);
+}
+
+void stopLeftWheel(){
+  motor_drive(STOP, FORWARDS, LEFT_WHEEL);
+}
+
+void updateLeft(){
+  prevLeftTime = leftTime;
+  leftTime = millis();
+}
+
+void updateRight(){
+  prevRightTime = rightTime;
+  rightTime = millis();
+}
+
+void leftHallInterrupt(){   
+   //Serial.print("Interrupt Detected LEFT HALL: ");
+   //Serial.println(digitalRead(LEFT_HALL));
+   
+
+   if (LEFT_HALL_SWITCH == false && digitalRead(LEFT_HALL) == LOW) {
+  //    Serial.println(" Setting up for falling edge..");
+      LEFT_HALL_SWITCH = true;
+   }
+
+   else if (LEFT_HALL_SWITCH == true && digitalRead(LEFT_HALL) == HIGH) {
+    LEFT_HALL_SWITCH = false;
+    if(++leftRots == MAG_ROT){
+      updateLeft();
+      leftRots = 0;
+    }
+ //   Serial.println("  LEFT Interrupt Executed");
+   }
+   
+//  Serial.println(" --> Interrupt Ignored");
+}
+
+void rightHallInterrupt(){
+ //  Serial.print("Interrupt Detected RIGHT HALL: ");
+ //  Serial.print(digitalRead(RIGHT_HALL));
+
+   if (RIGHT_HALL_SWITCH == false && digitalRead(RIGHT_HALL) == LOW) {
+      //Serial.println(" Setting up for falling edge..");
+      RIGHT_HALL_SWITCH = true;
+   }
+
+   else if (RIGHT_HALL_SWITCH == true && digitalRead(RIGHT_HALL) == HIGH) {
+    RIGHT_HALL_SWITCH = false;
+    if(++rightRots == MAG_ROT){
+      updateRight();
+      rightRots = 0;
+    }
+    //Serial.println("  RIGHT Interrupt Executed");
+   }
+   
+ // Serial.println(" --> Interrupt Ignored");
+}
+
+float sensor_ping(){
+  float temp = read_Temp();
+  float speed_of_sound = 331.5 + (0.6 * temp);
+
+  //Need to convert from the pulse length in
+  //microseconds into seconds
+  unsigned long pulse_length = getPulseDuration();
+  float pulse_sec = pulse_length * pow(10, -6);
+
+  //Need to account for the round trip
+  float distance = 50 * pulse_sec * speed_of_sound;
+  
+  return distance;
+}
+
+float sensor_avg(){
+  float dist = 0;
+  for(int i = 0; i < 3; i++){
+    dist += sensor_ping();
+    delay(50);
+  }
+  return dist / 3;
+}
+
+unsigned long getPulseDuration(){
+  unsigned long start = micros();
+
+  //Initiate the exchange of data
+  digitalWrite(TRIG_PIN,LOW);
+  delayMicroseconds(5);
+  digitalWrite(TRIG_PIN,HIGH);
+  delayMicroseconds(15);
+  digitalWrite(TRIG_PIN,LOW);
+
+  //wait for the sensor's response
+  return pulseIn(ECHO_PIN, HIGH);
+}
+
+float read_Temp(){
+  //Read the voltage off of the sensor
+  int v_out = analogRead(TEMP_PIN);
+  //Scale it to the actual value
+  float mv_out = 4.9 * v_out;
+  //Get the temperature based on the datasheet
+  return mv_out / 10;
+}
+
+float lookLeft(){
+
+  servo.write(LEFT);
+  delay(250);
+
+  float dist = 0;
+  for(int i = 0; i < NUM_READS; i++){
+    dist += sensor_ping();
+    delay(50);
+  }
+  servo.write(FRONT);
+
+  return dist/NUM_READS;
+}
+
+float lookRight(){
+
+  servo.write(RIGHT);
+  delay(250);
+
+  float dist = 0;
+  for(int i = 0; i < NUM_READS; i++){
+    dist += sensor_ping();
+    delay(50);
+  }
+  servo.write(FRONT);
+
+  return dist/NUM_READS;
+}
+
+void turnLeft(){
+
+  transmit_message(MSG_LEFT);
+  
+  unsigned long storePrevLeft = prevLeftTime;
+  unsigned long storeLeft = leftTime;
+  unsigned long storePrevRight = prevRightTime;
+  unsigned long storeRight = rightTime;
+  
+  reverseLeftWheel();
+  driveRightWheel(TURN_SPEED);
+  delay(TURN_TIME);
+
+  stopLeftWheel();
+  stopRightWheel();
+
+  prevRightTime = storePrevRight;
+  rightTime = storeRight;
+  prevLeftTime = storePrevLeft;
+  leftTime = storeLeft;
+}
+
+void turnRight(){
+  
+  transmit_message(MSG_RIGHT);
+
+  unsigned long storePrevLeft = prevLeftTime;
+  unsigned long storeLeft = leftTime;
+  unsigned long storePrevRight = prevRightTime;
+  unsigned long storeRight = rightTime;
+  
+  reverseRightWheel();
+  driveLeftWheel(TURN_SPEED * 1.1);
+  delay(TURN_TIME);
+
+  stopLeftWheel();
+  stopRightWheel();
+
+  prevRightTime = storePrevRight;
+  rightTime = storeRight;
+  prevLeftTime = storePrevLeft;
+  leftTime = storeLeft;
+}
+
+void slowDown(){
+
+  transmit_message(MSG_SLOWING_DOWN);
+
+  int slowSpeed = TOP_SPEED;
+  float dist = sensor_ping();
+  if(dist > 50){
+      dist = 50;
+      transmit_message(MSG_STRAIGHT);
+  }else{
+    transmit_message(MSG_SLOWING_DOWN);
+  }
+    
+  while(dist > TURN_DIST && sensor_ping() > TURN_DIST){
+
+    slowSpeed = 5 * dist;
+
+    driveLeftWheel(slowSpeed);
+    driveRightWheel(slowSpeed);
+    delay(50);
+    dist = sensor_ping();
+    if(dist > 50){
+      dist = 50;
+      transmit_message(MSG_STRAIGHT);
+  }else{
+    transmit_message(MSG_SLOWING_DOWN);
+  }
+  }
+
+  stopLeftWheel();
+  stopRightWheel();
+}
+
+//Bluetooth App Function
+void runBluetooth(){
+  Serial.begin(9600);
+  char bluetoothChar;
+  do{
+    if(Serial.available()){//if there is data being recieved
+      bluetoothChar = Serial.read(); //read it
+  
+      switch(bluetoothChar){
+         case '0' :
+                    transmit_message(MSG_BUZZER_ON);
+                    stopLeftWheel();
+                    stopRightWheel();
+                    delay(500);
+                    transmit_message(MSG_BUZZER_OFF);
+                    break;
+         case '1' :  
+         
+                    transmit_message(MSG_STRAIGHT);
+                    driveLeftWheel(NAV_SPEED);
+                    driveRightWheel(NAV_SPEED);
+                    break;
+         case '2' :
+         
+                    transmit_message(MSG_REVERSE);
+                    stopLeftWheel();
+                    stopRightWheel();
+                    break;
+        case '3' :
+                    turnLeft();
+                    driveLeftWheel(NAV_SPEED);
+                    driveRightWheel(NAV_SPEED);
+                    break;
+        case '4' :
+                    turnRight();                    
+                    driveLeftWheel(NAV_SPEED);
+                    driveRightWheel(NAV_SPEED);
+                    break;
+      
+        case '5' : 
+                    //Change into line following mode
+                    sw1 = HIGH;
+                    sw2 = HIGH;
+                    btOverride = true;
+                    return;
+
+        case '6' :  
+                    //change into wall mode
+                    sw1 = LOW;
+                    sw2 = LOW;
+                    btOverride = true;
+                    return;
+
+        case '7' : 
+                    //change into BT control mode
+                    sw1 = HIGH;
+                    sw2 = LOW;
+                    btOverride = true;
+                    return;
+      }
+    }
+  } while(1 == 1);
+}
+
+//MASTER-SLAVE FUNCTIONS
+void transmit_message(int message){
+  Wire.beginTransmission(8); // transmit to device #8
+  Wire.write(message);       // sends one byte
+  Wire.endTransmission();    // stop transmitting.
+}

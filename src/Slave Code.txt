@@ -1,0 +1,136 @@
+#include <Wire.h>
+#include <LiquidCrystal.h>
+
+#define EN 9
+#define RS 10
+#define D4 7
+#define D5 6
+#define D6 5
+#define D7 4
+
+#define LEDbr 12
+#define LEDbl 11
+#define LEDfr 13
+#define LEDfl 8
+
+#define BUZZER A3
+#define NOTE 800
+
+#define LEFT 0
+#define RIGHT 1
+#define STRAIGHT 2
+#define REVERSE 3
+#define START 4
+#define BUZZER_ON 5
+#define BUZZER_OFF 6
+#define FOLLOW_LINE 7
+#define FINDING_LINE 8
+#define SLOWING_DOWN 9
+LiquidCrystal lcd(RS, EN, D4, D5, D6, D7);
+
+void LEDs(int, int, int, int);
+
+
+int lastByte = 666;
+void setup() {
+  Wire.begin(8);                // join i2c bus with address #8
+  Wire.onReceive(receiveEvent); // register event
+  Serial.begin(9600);           // start serial for output
+
+  lcd.begin(16, 2);
+
+  // intitalize LED pins
+  pinMode(LEDbr, OUTPUT);
+  pinMode(LEDbl, OUTPUT);
+  pinMode(LEDfr, OUTPUT);
+  pinMode(LEDfl, OUTPUT);
+
+  pinMode(BUZZER, OUTPUT);
+
+  lcd.print("Hello");
+}
+
+void loop() {
+  
+  delay(100);
+}
+
+/*
+ *  Executes the correct state whenever data is received from the master Arduino.
+ */
+void receiveEvent(int howMany) {
+  int thisByte = Wire.read();    // receive byte as an integer
+  Serial.println(thisByte);
+  lcd.clear();
+  
+  switch (thisByte)
+  {
+    case LEFT:
+      lcd.print("Turning left");
+      LEDs(HIGH, HIGH, LOW, LOW);
+      break;
+    case RIGHT:
+      lcd.print("Turning right");
+      LEDs(LOW, LOW, HIGH, HIGH);
+      break;
+    case STRAIGHT:
+      lcd.print("Going straight");
+      LEDs(LOW, HIGH, LOW, HIGH);
+      break;
+    case START:
+      lcd.print("Hello Master...");
+      LEDs(LOW, LOW, LOW, LOW);
+      break;
+    case BUZZER_ON:
+      lcd.print("beep!");
+      tone(BUZZER, NOTE);
+      LEDs(HIGH, HIGH, HIGH, HIGH);
+      break;
+    case BUZZER_OFF:
+      lcd.print("BEEP!");
+      noTone(BUZZER);
+      LEDs(LOW, LOW, LOW, LOW);
+      break;
+    case FOLLOW_LINE:
+      lcd.print("Following Line");
+      lastByte = thisByte;
+      // flash LEDs
+     // do{
+        LEDs(HIGH, HIGH, HIGH, HIGH);
+      //  delay(1000);
+       // LEDs(LOW, LOW, LOW, LOW);
+        //delay(1000);
+    //  }while(thisByte == lastByte);
+      break;
+    case FINDING_LINE:
+      lcd.print("Finding Line");
+      lastByte = thisByte;
+      do{
+        // flash LEDs
+        LEDs(HIGH, HIGH, HIGH, HIGH);
+       // delay(250);
+        LEDs(LOW, LOW, LOW, LOW);
+       // delay(250);
+      }while(thisByte == lastByte);
+      break;
+    case SLOWING_DOWN:
+      lcd.print("Slowing Down");
+      LEDs(HIGH, LOW, HIGH, LOW);
+      break;
+    default:
+      lastByte = 666; 
+      LEDs(LOW, LOW, LOW, LOW);
+  }
+}
+
+/*
+ * Turns on and off the four LEDs
+ */
+void LEDs(int back_left, int front_left, int back_right, int front_right) {
+  Serial.println("hi");
+  digitalWrite(LEDbl, back_left);
+  digitalWrite(LEDfl, front_left);
+  digitalWrite(LEDbr, back_right);
+  digitalWrite(LEDfr, front_right);
+}
+
